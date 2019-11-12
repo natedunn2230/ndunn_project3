@@ -9,7 +9,7 @@
 #include <stdio.h>
 #include <cuda.h>
 
-#define  N 262144// Length of vector that will be summed
+#define  N 1048576// Length of vector that will be summed
 #define BLOCK_SIZE 256// size of thread blocks
 
 /**
@@ -33,7 +33,7 @@ int hostSumReduction(int* x, int length){
  * sum: sum array of input stored
  * length: Length of the vector to be added
 */
-__global__ void deviceSumReduction(int *input, int *sum, int length){
+__global__ void deviceSumReduction(int *input, int length){
 	__shared__ int partialSum[2*BLOCK_SIZE];
 	unsigned int tx = threadIdx.x;
 	unsigned int start = 2*blockIdx.x*blockDim.x;
@@ -47,41 +47,69 @@ __global__ void deviceSumReduction(int *input, int *sum, int length){
 			partialSum[tx] += partialSum[tx+stride];
 	}
 	
-	sum[blockIdx.x] = partialSum[0];
-	//printf("(%d, %d)\t%d\n", blockIdx.x, threadIdx.x, sum[blockIdx.x]); 
+	input[blockIdx.x] = partialSum[0];
+	printf("(%d, %d)\t%d\n", blockIdx.x, threadIdx.x, input[blockIdx.x]); 
 }
 
 /**
- * Prints the specified vector
- * vect: vector to be printed
- * length: length of vector
+ * Calls cuda kernel function recursively to get total sum reduction
+ * a: Array to be summed
+ * length: length of array to be summed
 */
-void printVector(int *vect, int length){
-	for(int i = 0; i < length; i++)
-		printf("%d\t", vect[i]);
+void applyReduction(int *a, int length){
+	
+	// make a copy of incoming array to be used for current sum
+	int *vect = (int*)malloc(sizeof(int) * length);
+	memcpy(vect, a, sizeof(int) * length);
+
+	int *vect_dev;
+	int sumSize = ceil((float)length / (2 * BLOCK_SIZE)); // size of sum array after each iteration
+	
+	// block and grid initialization for gpu
+	dim3 dimBlock(BLOCK_SIZE, 1, 1);
+	dim3 dimGrid(ceil((float)length / dimBlock.x), 1, 1);
+	
+	// allocate vectors for gpu
+	cudaMalloc((void **)(&vect_dev), length * sizeof(int));
+	
+	// copy array a (host) to dev_a (device)
+	cudaMemcpy(vect_dev, vect, length * sizeof(int), cudaMemcpyHostToDevice);
+	cudaDeviceSynchronize();
+	
+	// Launch kernels for reduction
+	deviceSumReduction<<<dimGrid, dimBlock>>>(vect_dev, length);
+	cudaDeviceSynchronize();
+	
+	// copy results from gpu back to host
+	cudaMemcpy(vect, vect_dev, sumSize * sizeof(int), cudaMemcpyDeviceToHost);
+	cudaDeviceSynchronize();
+	
+	// free allocated device memory
+	cudaFree(vect_dev);
+	cudaDeviceSynchronize();
+	
+	printf("\nFOR sum size of %d\n", sumSize);
+	for(int i = 0; i < sumSize; i++){
+		
+		printf("%d ", vect[i]);
+	}
 	printf("\n");
+	
+	// apply reduction again on sum array, if applicable
+	// if(sumSize > 1)
+		// //return 0 + applyReduction(vect, sumSize);
+	// else{
+		// int sum = vect[0];
+		// free(vect);
+		// //return sum;
+	// }
 }
 
 int main(void){
-	printf("\nSTARTING REDUCTION SUM ON VECTOR OF SIZE: %d\n\n", N);
-	
-	int *a, *sumArray, *dev_a, *dev_sumArray;
-	
-	// used to keep track of sum array size (if n is larger than 2 * blocksize), then 
-	// multiple kernel calls will have to be made
-	int sumSize = ceil((float)N / (2 * BLOCK_SIZE)); 
+	printf("VECTOR OF SIZE: %d\nBLOCK SIZE: %d\n\n", N, BLOCK_SIZE);
 
-	// block and grid initialization for gpu
-	dim3 dimBlock(BLOCK_SIZE, 1, 1);
-	dim3 dimGrid(ceil(N / dimBlock.x), 1, 1);
-	
-	// allocate vectors for cpu
-	a = (int*)malloc(sizeof(int)* N);
-	sumArray = (int*)malloc(sizeof(int)* sumSize); // holds initial sum array
-	
-	// allocate vectors for gpu
-	cudaMalloc((void **)(&dev_a), N* sizeof(int));
-	cudaMalloc((void **)(&dev_sumArray), sumSize * sizeof(int));
+	// allocate vector for cpu
+	int *a = (int*)malloc(sizeof(int)* N);
 	
 	// initialize vector
 	int init =1325;
@@ -89,75 +117,38 @@ int main(void){
 		init=3125*init%65521;
 		a[i]=(init-32768)/16384;
 	}
-	//printVector(a, N);
 	
-	// copy array a (host) to dev_a (device)
-	cudaMemcpy(dev_a,a,N * sizeof(int), cudaMemcpyHostToDevice);
-	cudaDeviceSynchronize();
+	// run reduction on device
+	//int gpuSum = applyReduction(a, N);
+	applyReduction(a, N);
+	// variables used to measure cpu computation time
+	clock_t cpuStart, cpuEnd;
+	float cpuTimeTaken;
 	
-	// Launch kernels for initial reduction
-	deviceSumReduction<<<dimGrid, dimBlock>>>(dev_a, dev_sumArray, N);
-	cudaDeviceSynchronize();
-	
-	// copy results from gpu back to host
-	cudaMemcpy(sumArray, dev_sumArray, sumSize * sizeof(int), cudaMemcpyDeviceToHost);
-	cudaDeviceSynchronize();
-	
-	// free memory used for initial sum array generation
-	cudaFree(dev_a);
-	cudaFree(dev_sumArray);
-	cudaDeviceSynchronize();
-	
-	// keep performing reduction on sum (if applicable)
-	int gpuSum = sumArray[0];
-	while(sumSize > 1){
-		dim3 dimGrid(ceil(sumSize / dimBlock.x), 1, 1);
-		// printf("sum: %d\n", gpuSum);
-		// printf("sum length: %d\n", sumSize);
-		int *dev_sumCpy; 
-		
-		// allocate vectors for gpu (holds 
-		cudaMalloc((void **)(&dev_sumArray), sumSize * sizeof(int));
-		cudaDeviceSynchronize();
-		
-		int newSumSize = ceil((float)sumSize / (2 * BLOCK_SIZE));
-		cudaMalloc((void **)(&dev_sumCpy), newSumSize * sizeof(int));
-		cudaDeviceSynchronize();
-		
-		// copy array b (host) to dev_b (device)
-		cudaMemcpy(dev_sumArray,sumArray, sumSize * sizeof(int), cudaMemcpyHostToDevice);
-		cudaDeviceSynchronize();
- 		
-		// Launch kernels for initial reduction
-		deviceSumReduction<<<dimGrid, dimBlock>>>(dev_sumArray, dev_sumCpy, sumSize);
-		cudaDeviceSynchronize();
-			
-		// copy results from gpu back to host
-		cudaMemcpy(sumArray, dev_sumCpy, newSumSize * sizeof(int), cudaMemcpyDeviceToHost);
-		cudaDeviceSynchronize();
-		
-		cudaFree(dev_sumArray);
-		cudaFree(dev_sumCpy);
-		cudaDeviceSynchronize();
-		
-		sumSize = newSumSize;
-		gpuSum = sumArray[0];
-	}
+	// start measuring cpu computation time
+	cpuStart = clock();
 	
 	// run sum reducton on host
 	int cpuSum = hostSumReduction(a, N);
 	
-	printf("GPU SUM: %d\n", gpuSum);
+	// stop measuring cpu computation time
+	cpuEnd = clock();
+	cpuTimeTaken = ((float)cpuEnd - cpuStart)/CLOCKS_PER_SEC; // in seconds 
+	
+	
+	//printf("GPU SUM: %d\n", gpuSum);
 	printf("CPU SUM: %d\n", cpuSum);
+	//printf("GPU SUM: %d\n", gpuSum);
 	
-	if(cpuSum == gpuSum)
-		printf("TEST PASSED!\n");
-	else 
-		printf("TEST FAILED!\n");
+	printf("\nCPU Time: %f\n", cpuTimeTaken);
 	
-	// free system and remaining device memory
+	// if(cpuSum == gpuSum)
+		// printf("TEST PASSED!\n");
+	// else 
+		// printf("TEST FAILED!\n");
+	
+	// free system memory
 	free(a);
-	free(sumArray);
-	
+		
 	return 0;
 }
