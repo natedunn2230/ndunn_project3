@@ -9,7 +9,7 @@
 #include <stdio.h>
 #include <cuda.h>
 
-#define  N 8// Length of vector that will be summed
+#define  N 16// Length of vector that will be summed
 #define BLOCK_SIZE 4// size of thread blocks
 
 /**
@@ -32,7 +32,7 @@ int hostSumReduction(int* x, int length){
  * a: vector to be summed
  * length: Length of the vector to be added
 */
-__global__ void deviceSumReduction(int *input, int*output, int width){
+__global__ void deviceSumReduction(int *input, int *sum, int length){
 	__shared__ int partialSum[2*BLOCK_SIZE];
 	unsigned int tx = threadIdx.x;
 	unsigned int start = 2*blockIdx.x*blockDim.x;
@@ -45,6 +45,9 @@ __global__ void deviceSumReduction(int *input, int*output, int width){
 		if (tx < stride)
 			partialSum[tx] += partialSum[tx+stride];
 	}
+	
+	sum[blockIdx.x] = partialSum[0];
+	printf("(%d, %d)\t%d\n", blockIdx.x, threadIdx.x, sum[blockIdx.x]); 
 }
 
 
@@ -52,17 +55,21 @@ __global__ void deviceSumReduction(int *input, int*output, int width){
 int main(void){
 	int *a, *b, *dev_a, *dev_b;
 	
+	// used to keep track of sum array size (if n is larger than 2 * blocksize), then 
+	// multiple kernel calls will have to be made
+	int sumSize = N / (2 * BLOCK_SIZE); 
+	
 	// block and grid initialization for gpu
 	dim3 dimBlock(BLOCK_SIZE, 1, 1);
 	dim3 dimGrid(ceil(N / dimBlock.x), 1, 1);
 	
 	// allocate vectors for cpu
 	a = (int*)malloc(sizeof(int)* N);
-	b = (int*)malloc(sizeof(int)* N);
+	b = (int*)malloc(sizeof(int)* sumSize);
 	
 	// allocate vectors for gpu
 	cudaMalloc((void **)(&dev_a), N* sizeof(int));
-	cudaMalloc((void **)(&dev_b), N* sizeof(int));
+	cudaMalloc((void **)(&dev_b), sumSize * sizeof(int));
 	
 	// initialize vector
 	int init =1325;
@@ -72,16 +79,37 @@ int main(void){
 		a[i] = i;
 	}
 	
-	// copy array a,b (system memory) to dev_a, dev_b (device memory)
+	// copy array a (host) to dev_a (device)
 	cudaMemcpy(dev_a,a,N * sizeof(int), cudaMemcpyHostToDevice);
-	cudaMemcpy(dev_b,b,N * sizeof(int), cudaMemcpyHostToDevice);
-	cudaDeviceSynchronize(); 
+	cudaDeviceSynchronize();
 	
+	// Launch kernels for initial reduction
+	deviceSumReduction<<<dimGrid, dimBlock>>>(dev_a, dev_b, N);
+	cudaDeviceSynchronize();
+	
+	// copy results from gpu back to host
+	cudaMemcpy(b, dev_b, sumSize * sizeof(int), cudaMemcpyDeviceToHost);
+	cudaDeviceSynchronize();
+	
+	// run sum reducton on host
 	int sum = hostSumReduction(a, N);
 	
 	printf("Hello world!\n");
 	printf("%d\n", sum);
 	
-	return 0;
+	//debugging b
+	for(int i =0; i < sumSize; i++){
+		printf("%d ", b[i]);
+	}
+	printf("\n");
 	
+	
+	// free system and device memory
+	free(a);
+	free(b);
+	cudaFree(dev_a);
+	cudaFree(dev_b);
+	
+	
+	return 0;
 }
