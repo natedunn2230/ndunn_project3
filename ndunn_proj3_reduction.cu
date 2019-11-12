@@ -10,7 +10,7 @@
 #include <cuda.h>
 
 #define  N 1048576// Length of vector that will be summed
-#define BLOCK_SIZE 256// size of thread blocks
+#define BLOCK_SIZE 2// size of thread blocks
 
 /**
  * Performs CPU Sum Reduction
@@ -48,7 +48,7 @@ __global__ void deviceSumReduction(int *input, int length){
 	}
 	
 	input[blockIdx.x] = partialSum[0];
-	printf("(%d, %d)\t%d\n", blockIdx.x, threadIdx.x, input[blockIdx.x]); 
+	//printf("(%d, %d)\t%d\n", blockIdx.x, threadIdx.x, input[blockIdx.x]); 
 }
 
 /**
@@ -56,7 +56,8 @@ __global__ void deviceSumReduction(int *input, int length){
  * a: Array to be summed
  * length: length of array to be summed
 */
-void applyReduction(int *a, int length){
+int applyReduction(int *a, int length){
+	cudaError_t cpyError;
 	
 	// make a copy of incoming array to be used for current sum
 	int *vect = (int*)malloc(sizeof(int) * length);
@@ -81,8 +82,11 @@ void applyReduction(int *a, int length){
 	cudaDeviceSynchronize();
 	
 	// copy results from gpu back to host
-	cudaMemcpy(vect, vect_dev, sumSize * sizeof(int), cudaMemcpyDeviceToHost);
+	cpyError = cudaMemcpy(vect, vect_dev, length * sizeof(int), cudaMemcpyDeviceToHost);
 	cudaDeviceSynchronize();
+	
+	if(cpyError)
+		printf("%s\n", cudaGetErrorString(cpyError));
 	
 	// free allocated device memory
 	cudaFree(vect_dev);
@@ -96,13 +100,13 @@ void applyReduction(int *a, int length){
 	printf("\n");
 	
 	// apply reduction again on sum array, if applicable
-	// if(sumSize > 1)
-		// //return 0 + applyReduction(vect, sumSize);
-	// else{
-		// int sum = vect[0];
-		// free(vect);
-		// //return sum;
-	// }
+	if(sumSize > 1)
+		return 0 + applyReduction(vect, sumSize);
+	else{
+		int sum = vect[0];
+		free(vect);
+		return sum;
+	}
 }
 
 int main(void){
@@ -119,8 +123,8 @@ int main(void){
 	}
 	
 	// run reduction on device
-	//int gpuSum = applyReduction(a, N);
-	applyReduction(a, N);
+	int gpuSum = applyReduction(a, N);
+
 	// variables used to measure cpu computation time
 	clock_t cpuStart, cpuEnd;
 	float cpuTimeTaken;
@@ -136,16 +140,15 @@ int main(void){
 	cpuTimeTaken = ((float)cpuEnd - cpuStart)/CLOCKS_PER_SEC; // in seconds 
 	
 	
-	//printf("GPU SUM: %d\n", gpuSum);
+	printf("GPU SUM: %d\n", gpuSum);
 	printf("CPU SUM: %d\n", cpuSum);
-	//printf("GPU SUM: %d\n", gpuSum);
 	
 	printf("\nCPU Time: %f\n", cpuTimeTaken);
 	
-	// if(cpuSum == gpuSum)
-		// printf("TEST PASSED!\n");
-	// else 
-		// printf("TEST FAILED!\n");
+	if(cpuSum == gpuSum)
+		printf("TEST PASSED!\n");
+	else 
+		printf("TEST FAILED!\n");
 	
 	// free system memory
 	free(a);
