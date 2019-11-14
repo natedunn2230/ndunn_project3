@@ -9,8 +9,8 @@
 #include <stdio.h>
 #include <cuda.h>
 
-#define  N 1048576// Length of vector that will be summed
-#define BLOCK_SIZE 2// size of thread blocks
+#define  N 16777216  // Length of vector that will be summed
+#define BLOCK_SIZE 128// size of thread blocks
 
 /**
  * Performs CPU Sum Reduction
@@ -18,7 +18,6 @@
  * length: width of vector x
 */
 int hostSumReduction(int* x, int length){
-
 	for (int i = 1; i < length; i++)
 		x[0] =x [0] + x[i];
 
@@ -30,7 +29,6 @@ int hostSumReduction(int* x, int length){
 /**
  * Performs GPU Sum Reduction
  * input: vector to be summed
- * sum: sum array of input stored
  * length: Length of the vector to be added
 */
 __global__ void deviceSumReduction(int *input, int length){
@@ -56,13 +54,12 @@ __global__ void deviceSumReduction(int *input, int length){
  * a: Array to be summed
  * length: length of array to be summed
 */
-int applyReduction(int *a, int length){
-	cudaError_t cpyError;
+void applyReduction(int *vect, int length, float *gpuTimes){
+	cudaEvent_t gpuStart,gpuStop;
 	
-	// make a copy of incoming array to be used for current sum
-	int *vect = (int*)malloc(sizeof(int) * length);
-	memcpy(vect, a, sizeof(int) * length);
-
+	// holds each time for computation / copy of each kernel call
+	float copyTo, computationTime, copyFrom;
+	
 	int *vect_dev;
 	int sumSize = ceil((float)length / (2 * BLOCK_SIZE)); // size of sum array after each iteration
 	
@@ -73,20 +70,54 @@ int applyReduction(int *a, int length){
 	// allocate vectors for gpu
 	cudaMalloc((void **)(&vect_dev), length * sizeof(int));
 	
+	// Begin measuring time for copying memory over to device
+	// cudaEventCreate(&gpuStart);
+	// cudaEventCreate(&gpuStop);
+	// cudaEventRecord(gpuStart,0);
+	
 	// copy array a (host) to dev_a (device)
 	cudaMemcpy(vect_dev, vect, length * sizeof(int), cudaMemcpyHostToDevice);
 	cudaDeviceSynchronize();
+	
+	// Finish measuring time for copying memory over to device
+	// cudaEventRecord(gpuStop,0);
+	// cudaEventSynchronize(gpuStop);
+	// cudaEventElapsedTime(&copyTo,gpuStart,gpuStop);
+    // cudaEventDestroy(gpuStart);
+    // cudaEventDestroy(gpuStop);
+	
+	
+	// Begin measuring GPU computation time
+	// cudaEventCreate(&gpuStart);
+	// cudaEventCreate(&gpuStop);
+	// cudaEventRecord(gpuStart,0);
 	
 	// Launch kernels for reduction
 	deviceSumReduction<<<dimGrid, dimBlock>>>(vect_dev, length);
 	cudaDeviceSynchronize();
 	
+	// Finish measuring GPU computation time
+	// cudaEventRecord(gpuStop,0);
+	// cudaEventSynchronize(gpuStop);
+	// cudaEventElapsedTime(&computationTime,gpuStart,gpuStop);
+    // cudaEventDestroy(gpuStart);
+    // cudaEventDestroy(gpuStop);
+	
+	// Begin measuring time for copying memory back to host
+	// cudaEventCreate(&gpuStart);
+	// cudaEventCreate(&gpuStop);
+	// cudaEventRecord(gpuStart,0);
+	
 	// copy results from gpu back to host
-	cpyError = cudaMemcpy(vect, vect_dev, length * sizeof(int), cudaMemcpyDeviceToHost);
+	cudaMemcpy(vect, vect_dev, length * sizeof(int), cudaMemcpyDeviceToHost);
 	cudaDeviceSynchronize();
 	
-	if(cpyError)
-		printf("%s\n", cudaGetErrorString(cpyError));
+	// Finish measuring time for copying memory back to host
+	// cudaEventRecord(gpuStop,0);
+	// cudaEventSynchronize(gpuStop);
+	// cudaEventElapsedTime(&copyFrom,gpuStart,gpuStop);
+    // cudaEventDestroy(gpuStart);
+    // cudaEventDestroy(gpuStop);
 	
 	// free allocated device memory
 	cudaFree(vect_dev);
@@ -99,21 +130,26 @@ int applyReduction(int *a, int length){
 	}
 	printf("\n");
 	
+	// update total times
+	// gpuTimes[0] += copyTo;
+	// gpuTimes[1] += computationTime;
+	// gpuTimes[2] += copyFrom;
+	
 	// apply reduction again on sum array, if applicable
 	if(sumSize > 1)
-		return 0 + applyReduction(vect, sumSize);
-	else{
-		int sum = vect[0];
-		free(vect);
-		return sum;
-	}
+		return applyReduction(vect, sumSize, gpuTimes);
 }
 
 int main(void){
 	printf("VECTOR OF SIZE: %d\nBLOCK SIZE: %d\n\n", N, BLOCK_SIZE);
+	
+	// passed to helper function "apply reduction" to get transfer to time [0],
+	// computation time [1] and transfer back time [2]
+	float gpuTimes[3];
 
 	// allocate vector for cpu
 	int *a = (int*)malloc(sizeof(int)* N);
+	int *b = (int*)malloc(sizeof(int)* N);
 	
 	// initialize vector
 	int init =1325;
@@ -122,9 +158,12 @@ int main(void){
 		a[i]=(init-32768)/16384;
 	}
 	
-	// run reduction on device
-	int gpuSum = applyReduction(a, N);
-
+	memcpy(b, a, sizeof(int)* N);
+	
+	// run reduction on gpu device
+	applyReduction(b, N, gpuTimes);
+	int gpuSum = b[0];
+	
 	// variables used to measure cpu computation time
 	clock_t cpuStart, cpuEnd;
 	float cpuTimeTaken;
@@ -132,7 +171,7 @@ int main(void){
 	// start measuring cpu computation time
 	cpuStart = clock();
 	
-	// run sum reducton on host
+	// run sum reduction on host
 	int cpuSum = hostSumReduction(a, N);
 	
 	// stop measuring cpu computation time
@@ -144,6 +183,8 @@ int main(void){
 	printf("CPU SUM: %d\n", cpuSum);
 	
 	printf("\nCPU Time: %f\n", cpuTimeTaken);
+	printf("GPU Time: %f\n", gpuTimes[1]);
+	printf("Memory Transfer Time: %f\n", gpuTimes[0] + gpuTimes[2]);
 	
 	if(cpuSum == gpuSum)
 		printf("TEST PASSED!\n");
@@ -152,6 +193,7 @@ int main(void){
 	
 	// free system memory
 	free(a);
-		
+	free(b);
+
 	return 0;
 }
