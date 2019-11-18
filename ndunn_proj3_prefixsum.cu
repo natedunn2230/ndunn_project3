@@ -10,7 +10,7 @@
 #include <cuda.h>
 
 #define N 8
-#define BLOCK_SIZE 2
+#define BLOCK_SIZE 1
 
 
 /**
@@ -27,15 +27,15 @@ void hostPrefixSum(int *y, int *x, int length){
 /**
 * Performs Prefix Sum on a vector using GPU
 */
-__global__ void work_efficient_scan_kernel (int *x, int *y, int InputSize){
+__global__ void work_efficient_scan_kernel(int *x, int *y, int *block_sum, int InputSize){
 
  	__shared__ int scan_array[2 * BLOCK_SIZE];
 
 	unsigned int t = threadIdx.x;
-	unsigned int start = 2*blockIdx.x * blockDim.x;
-	scan_array[t] = x[start + t];
-	scan_array[blockDim.x + t] = x[start + blockDim.x + t];
-
+	unsigned int start = 2 * blockIdx.x * blockDim.x;
+	scan_array[t] = y[start + t];
+	scan_array[blockDim.x + t] = y[start + blockDim.x + t];
+	
 	__syncthreads();
 
 	// Perform reduction step
@@ -45,20 +45,20 @@ __global__ void work_efficient_scan_kernel (int *x, int *y, int InputSize){
 		
         if(index < 2 * BLOCK_SIZE)
             scan_array[index] += scan_array[index-reduction_stride];
-		
-        reduction_stride = reduction_stride*2;
+
+        reduction_stride = reduction_stride * 2;
 
         __syncthreads();
     }
 
 	// Perform post scan step
-    int post_stride = BLOCK_SIZE/2;
+    int post_stride = BLOCK_SIZE / 2;
     while(post_stride > 0){
         int index = (threadIdx.x + 1) * post_stride * 2 - 1;
 		
         if(index + post_stride < 2 * BLOCK_SIZE)
 			scan_array[index + post_stride] += scan_array[index];
-		
+
         post_stride = post_stride / 2;
         __syncthreads();
     }
@@ -67,7 +67,8 @@ __global__ void work_efficient_scan_kernel (int *x, int *y, int InputSize){
 
 	x[start + t] = scan_array[t];
 	x[start+ blockDim.x + t] = scan_array[blockDim.x + t];
-
+	
+	block_sum[blockIdx.x] = x[start + blockDim.x + t];
 }
 
 
@@ -95,25 +96,75 @@ void printVector(int *a, int length){
 }
 
 int main(void){
-	int *a, *b;
+	
+	printf("\nVECTOR SIZE: %d\nBLOCK SIZE: %d\n\n", N, BLOCK_SIZE);
+	
+	// block and grid initialization for gpu
+	dim3 dimBlock(BLOCK_SIZE, 1, 1);
+	dim3 dimGrid(ceil(N / dimBlock.x), 1, 1);
+	
+	int *vect, *cpu_sum, *gpu_sum, *block_sum, *vect_dev, *gpu_sum_dev, *block_sum_dev; 
 	
 	// initialize cpu vectors
-	a = (int*)malloc(sizeof(int) * N); // original vector
-	b = (int*)malloc(sizeof(int) * N); // stores cpu prefix sum
+	vect = (int*)malloc(sizeof(int) * N); // original vector
+	cpu_sum = (int*)malloc(sizeof(int) * N); // stores cpu prefix sum
+	gpu_sum = (int*)malloc(sizeof(int) * N); // stores copied gpu prefix sum
+	block_sum = (int*)malloc(sizeof(int) * (N / ( 2 * BLOCK_SIZE))); // stores copied gpu prefix sum
 	
-	// initialize a
+	// initialize vect
 	int init = 1325;
-	for (int i=0; i<N; i++){
-		init=3125*init%65521;
-		a[i]=(init-32768)/16384;
+	for (int i = 0; i < N; i++){
+		init = 3125 * init % 65521;
+		vect[i] = (init - 32768) / 16384;
 	}
 	
+	// allocate device memory
+	cudaMalloc((void **)(&vect_dev), N * sizeof(int));
+	cudaMalloc((void **)(&gpu_sum_dev), N * sizeof(int));
+	cudaMalloc((void **)(&block_sum_dev), (N / ( 2 * BLOCK_SIZE)) * sizeof(int));
+	
+	// copy vector on host to gpu device
+	cudaMemcpy(vect_dev, vect, N * sizeof(int), cudaMemcpyHostToDevice);
+	cudaDeviceSynchronize();
+	
+	// Launch kernels for sum
+	work_efficient_scan_kernel<<<dimGrid, dimBlock>>>(gpu_sum_dev, vect_dev, block_sum_dev, N);
+	cudaDeviceSynchronize();
+	
+	// copy sum scan vector on device back to host
+	cudaMemcpy(gpu_sum, gpu_sum_dev, N * sizeof(int), cudaMemcpyDeviceToHost);
+	cudaDeviceSynchronize();
+	
+	// copy block sum vector on device back to host
+	cudaMemcpy(block_sum, block_sum_dev, (N / ( 2 * BLOCK_SIZE)) * sizeof(int), cudaMemcpyDeviceToHost);
+	cudaDeviceSynchronize();
+	
+	
 	// perform prefix sum on cpu
-	hostPrefixSum(b, a, N);
+	hostPrefixSum(cpu_sum, vect, N);
+	
+	printf("GPU prefix sum:\n");
+	printVector(gpu_sum, N);
+	
+	printf("CPU prefix sum:\n");
+	printVector(cpu_sum, N);
+	
+	printf("Block sum: \n");
+	printVector(block_sum, (N / (BLOCK_SIZE * 2)));
+	
+	if(verify(gpu_sum, cpu_sum, N))
+		printf("\nTEST PASSED!\n");
+	else
+		printf("\nTEST FAILED!\n");
 	
 	
-	
-
+	free(vect);
+	free(cpu_sum);
+	free(gpu_sum);
+	free(block_sum);
+	cudaFree(vect_dev);
+	cudaFree(gpu_sum_dev);
+	cudaFree(block_sum_dev);
 	
 	return 0;	
 }
