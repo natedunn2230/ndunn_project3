@@ -10,7 +10,7 @@
 #include <cuda.h>
 
 #define N 2048
-#define BLOCK_SIZE 1024
+#define BLOCK_SIZE 1024 
 
 
 /**
@@ -96,30 +96,66 @@ void printVector(int *a, int length){
 }
 
 /**
-	Performs the initial prefix sum on the vector.
+	Performs prefix sum on the vector
 */
-void initialPrefixSum(int *vect, int *gpu_sum, int *sum_arr, int length){
+void doPrefixSum(int *vect, int *gpu_sum, int *sum_arr, int length){
+	cudaEvent_t gpuStart,gpuStop;
 	
 	int sumArraySize = ceil((float)N / (2 * BLOCK_SIZE));
 	
 	int *vect_dev, *gpu_sum_dev, *sum_arr_dev;
 	
+	// holds each time for computation / copy of each kernel call
+	float copyTo, computationTime, copyFrom;
+	
 	// block and grid initialization for gpu
 	dim3 dimBlock(BLOCK_SIZE, 1, 1);
 	dim3 dimGrid(ceil(N / dimBlock.x), 1, 1);
 	
+
 	// allocate device memory
 	cudaMalloc((void **)(&vect_dev), N * sizeof(int));
 	cudaMalloc((void **)(&gpu_sum_dev), N * sizeof(int));
 	cudaMalloc((void **)(&sum_arr_dev), sumArraySize * sizeof(int));
 	
+	// Begin measuring time for copying memory over to device
+	cudaEventCreate(&gpuStart);
+	cudaEventCreate(&gpuStop);
+	cudaEventRecord(gpuStart,0);
+	
 	// copy vector on host to gpu device
 	cudaMemcpy(vect_dev, vect, N * sizeof(int), cudaMemcpyHostToDevice);
 	cudaDeviceSynchronize();
 	
+	// Finish measuring time for copying memory over to device
+	cudaEventRecord(gpuStop,0);
+	cudaEventSynchronize(gpuStop);
+	cudaEventElapsedTime(&copyTo,gpuStart,gpuStop);
+	cudaEventDestroy(gpuStart);
+	cudaEventDestroy(gpuStop);
+	
+	
+	// Begin measuring GPU computation time
+	cudaEventCreate(&gpuStart);
+	cudaEventCreate(&gpuStop);
+	cudaEventRecord(gpuStart,0);
+	
 	// Launch kernels for sum
 	work_efficient_scan_kernel<<<dimGrid, dimBlock>>>(gpu_sum_dev, vect_dev, sum_arr_dev, N);
 	cudaDeviceSynchronize();
+	
+	// Finish measuring GPU computation time
+	cudaEventRecord(gpuStop,0);
+	cudaEventSynchronize(gpuStop);
+	cudaEventElapsedTime(&computationTime,gpuStart,gpuStop);
+	cudaEventDestroy(gpuStart);
+	cudaEventDestroy(gpuStop);
+	
+	
+	// Begin measuring time for copying memory back to host
+	cudaEventCreate(&gpuStart);
+	cudaEventCreate(&gpuStop);
+	cudaEventRecord(gpuStart,0);
 	
 	// copy sum scan vector on device back to host
 	cudaMemcpy(gpu_sum, gpu_sum_dev, N * sizeof(int), cudaMemcpyDeviceToHost);
@@ -129,10 +165,20 @@ void initialPrefixSum(int *vect, int *gpu_sum, int *sum_arr, int length){
 	cudaMemcpy(sum_arr, sum_arr_dev, sumArraySize * sizeof(int), cudaMemcpyDeviceToHost);
 	cudaDeviceSynchronize();
 	
+	// Finish measuring time for copying memory back to host
+	cudaEventRecord(gpuStop,0);
+	cudaEventSynchronize(gpuStop);
+	cudaEventElapsedTime(&copyFrom,gpuStart,gpuStop);
+	cudaEventDestroy(gpuStart);
+	cudaEventDestroy(gpuStop);
+
 	// free system and device memory
 	cudaFree(vect_dev);
 	cudaFree(gpu_sum_dev);
 	cudaFree(sum_arr_dev);
+	
+	printf("GPU Time: %f\n", computationTime);
+	printf("Memory Transfer Time: %f\n", copyTo + copyFrom);
 }
 
 
@@ -158,16 +204,23 @@ int main(void){
 	}
 	
 	// perform initial sum on vector and then prefix sum on the sum array (if applicable)
-	initialPrefixSum(vect, gpu_sum, sum_arr, N);
+	doPrefixSum(vect, gpu_sum, sum_arr, N);
+	
+	// variables used to measure cpu computation time
+	clock_t cpuStart, cpuEnd;
+	float cpuTimeTaken;
+	
+	// start measuring cpu computation time
+	cpuStart = clock();
 	
 	// perform prefix sum on cpu
 	hostPrefixSum(cpu_sum, vect, N);
 	
-	printf("GPU prefix sum:\n");
-	//printVector(gpu_sum, N);
+	// stop measuring cpu computation time
+	cpuEnd = clock();
+	cpuTimeTaken = ((float)cpuEnd - cpuStart)/CLOCKS_PER_SEC; // in seconds 
 	
-	printf("CPU prefix sum:\n");
-	//printVector(cpu_sum, N);
+	printf("\nCPU Time: %f\n", cpuTimeTaken);
 
 	if(verify(gpu_sum, cpu_sum, N))
 		printf("\nTEST PASSED!\n");
