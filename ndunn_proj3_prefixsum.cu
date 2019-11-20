@@ -9,8 +9,8 @@
 #include <stdio.h>
 #include <cuda.h>
 
-#define N 8
-#define BLOCK_SIZE 1
+#define N 2048
+#define BLOCK_SIZE 1024
 
 
 /**
@@ -27,7 +27,7 @@ void hostPrefixSum(int *y, int *x, int length){
 /**
 * Performs Prefix Sum on a vector using GPU
 */
-__global__ void work_efficient_scan_kernel(int *x, int *y, int *block_sum, int InputSize){
+__global__ void work_efficient_scan_kernel(int *x, int *y, int *sum_arr, int InputSize){
 
  	__shared__ int scan_array[2 * BLOCK_SIZE];
 
@@ -68,7 +68,7 @@ __global__ void work_efficient_scan_kernel(int *x, int *y, int *block_sum, int I
 	x[start + t] = scan_array[t];
 	x[start+ blockDim.x + t] = scan_array[blockDim.x + t];
 	
-	block_sum[blockIdx.x] = x[start + blockDim.x + t];
+	sum_arr[blockIdx.x] = x[start + blockDim.x + t];
 }
 
 
@@ -90,18 +90,19 @@ int verify(int *a, int *b, int length){
 void printVector(int *a, int length){
 
 	for(int i = 0; i < length; i++){
-		printf("%d ", a[i]);
+		printf("|%d", a[i]);
 	}
-	printf("\n");
+	printf("|\n");
 }
 
 /**
-	Performs prefix sum on vector 'a'
+	Performs the initial prefix sum on the vector.
 */
-void applyPrefixSum(int *vect, int *gpu_sum, int length){
-	int *block_sum, *vect_dev, *gpu_sum_dev, *block_sum_dev;
+void initialPrefixSum(int *vect, int *gpu_sum, int *sum_arr, int length){
 	
-	block_sum = (int*)malloc(sizeof(int) * (N / ( 2 * BLOCK_SIZE))); // stores copied gpu prefix sum
+	int sumArraySize = ceil((float)N / (2 * BLOCK_SIZE));
+	
+	int *vect_dev, *gpu_sum_dev, *sum_arr_dev;
 	
 	// block and grid initialization for gpu
 	dim3 dimBlock(BLOCK_SIZE, 1, 1);
@@ -110,14 +111,14 @@ void applyPrefixSum(int *vect, int *gpu_sum, int length){
 	// allocate device memory
 	cudaMalloc((void **)(&vect_dev), N * sizeof(int));
 	cudaMalloc((void **)(&gpu_sum_dev), N * sizeof(int));
-	cudaMalloc((void **)(&block_sum_dev), (N / ( 2 * BLOCK_SIZE)) * sizeof(int));
+	cudaMalloc((void **)(&sum_arr_dev), sumArraySize * sizeof(int));
 	
 	// copy vector on host to gpu device
 	cudaMemcpy(vect_dev, vect, N * sizeof(int), cudaMemcpyHostToDevice);
 	cudaDeviceSynchronize();
 	
 	// Launch kernels for sum
-	work_efficient_scan_kernel<<<dimGrid, dimBlock>>>(gpu_sum_dev, vect_dev, block_sum_dev, N);
+	work_efficient_scan_kernel<<<dimGrid, dimBlock>>>(gpu_sum_dev, vect_dev, sum_arr_dev, N);
 	cudaDeviceSynchronize();
 	
 	// copy sum scan vector on device back to host
@@ -125,17 +126,13 @@ void applyPrefixSum(int *vect, int *gpu_sum, int length){
 	cudaDeviceSynchronize();
 	
 	// copy block sum vector on device back to host
-	cudaMemcpy(block_sum, block_sum_dev, (N / ( 2 * BLOCK_SIZE)) * sizeof(int), cudaMemcpyDeviceToHost);
+	cudaMemcpy(sum_arr, sum_arr_dev, sumArraySize * sizeof(int), cudaMemcpyDeviceToHost);
 	cudaDeviceSynchronize();
 	
-	printf("Block sum: \n");
-	printVector(block_sum, (N / (BLOCK_SIZE * 2)));
-	
 	// free system and device memory
-	free(block_sum);
 	cudaFree(vect_dev);
 	cudaFree(gpu_sum_dev);
-	cudaFree(block_sum_dev);
+	cudaFree(sum_arr_dev);
 }
 
 
@@ -143,13 +140,15 @@ void applyPrefixSum(int *vect, int *gpu_sum, int length){
 int main(void){
 	
 	printf("\nVECTOR SIZE: %d\nBLOCK SIZE: %d\n\n", N, BLOCK_SIZE);
-	
-	int *vect, *cpu_sum, *gpu_sum;
+	int sumArraySize = ceil((float)N / (2 * BLOCK_SIZE));
+	int *vect, *cpu_sum, *gpu_sum, *sum_arr, *sum_arr_prefix;
 	
 	// initialize cpu vectors
 	vect = (int*)malloc(sizeof(int) * N); // original vector
 	cpu_sum = (int*)malloc(sizeof(int) * N); // stores cpu prefix sum
 	gpu_sum = (int*)malloc(sizeof(int) * N); // stores copied gpu prefix sum
+	sum_arr = (int*)malloc(sizeof(int) * sumArraySize); // stores block sums
+	sum_arr_prefix = (int*)malloc(sizeof(int) * 2 * BLOCK_SIZE); // stores prefix sum of block sum
 	
 	// initialize vect
 	int init = 1325;
@@ -158,18 +157,18 @@ int main(void){
 		vect[i] = (init - 32768) / 16384;
 	}
 	
-	applyPrefixSum(vect, gpu_sum, N);
+	// perform initial sum on vector and then prefix sum on the sum array (if applicable)
+	initialPrefixSum(vect, gpu_sum, sum_arr, N);
 	
 	// perform prefix sum on cpu
 	hostPrefixSum(cpu_sum, vect, N);
 	
 	printf("GPU prefix sum:\n");
-	printVector(gpu_sum, N);
+	//printVector(gpu_sum, N);
 	
 	printf("CPU prefix sum:\n");
-	printVector(cpu_sum, N);
+	//printVector(cpu_sum, N);
 
-	
 	if(verify(gpu_sum, cpu_sum, N))
 		printf("\nTEST PASSED!\n");
 	else
@@ -179,6 +178,8 @@ int main(void){
 	free(vect);
 	free(cpu_sum);
 	free(gpu_sum);
-
+	free(sum_arr);
+	free(sum_arr_prefix);
+	
 	return 0;	
 }
